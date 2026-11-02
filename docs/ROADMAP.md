@@ -4,8 +4,11 @@
 
 - [x] Create private GitHub repository and invite `pc099` with write access.
 - [x] Define owner-controlled charter, target architecture, and threat model.
-- [ ] Implement local task ledger with atomic claim/transition behavior and tests.
-- [ ] Add CI, lint/type checks, contribution policy, and branch protection.
+- [x] Implement local task ledger with atomic claim/transition behavior and tests.
+- [x] Push the foundation and research notes to `main`.
+- [ ] Owner accepts the pending contributor invitation.
+- [ ] Add the checked-in CI template after GitHub authorizes workflow writes.
+- [ ] Enable server-side branch protection after plan/permissions allow it; keep repo private until owner decides otherwise.
 
 ## Phase 1 — human-triggered isolated draft PR
 

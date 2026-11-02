@@ -16,8 +16,9 @@ Source code, GitHub write access, owner identity, build/test integrity, task evi
 ## Initial controls
 
 - Phase 0 does not execute task instructions or launch agents.
-- Private repository; `pc099` is invited with write role, pending acceptance.
-- Charter and protected paths are human-owned; human merge/deploy only.
+- The repository is private and `pc099` has a pending GitHub write invitation. The owner has not accepted it yet (invite ID 341123189).
+- GitHub rejected branch-protection access for this private repository's plan (requires Pro or repository visibility change). The repository remains private; no policy/visibility workaround was attempted. **Human review is documented but not yet enforced by server-side branch rules.**
+- No CI workflow was pushed because the authorized GitHub token lacks the `workflow` scope; an owner-reviewable setup template is checked in at `docs/workflows/tests.yml.example`.
 - No secrets in tasks; no prod credentials or host-wide mounts for future workers.
 - Local state writes are atomic and transitions validate expected revision.
 - Future worker runs require disposable isolation, restricted network/filesystem, task-scoped credentials, hard time/cost limits, independently controlled tests, and an out-of-band kill switch.

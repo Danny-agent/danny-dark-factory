@@ -6,7 +6,9 @@ Private, human-reviewed software-factory prototype. **This repository currently 
 - [Architecture](docs/ARCHITECTURE.md) — component boundaries and intended workflow.
 - [Threat model](docs/THREAT_MODEL.md) — assets, failure cases, and guardrails.
 - [Research](docs/RESEARCH.md) — research evidence and component-selection rationale.
-- [Roadmap](docs/ROADMAP.md) — adoption steps; human-owned release is the default.
+- [Roadmap](docs/ROADMAP.md) — staged adoption plan.
+- [Contributing](CONTRIBUTING.md) — development and security rules.
+
 ## Quickstart
 
 Requires Python 3.11+.
@@ -24,3 +26,7 @@ factory task-list ./factory-state
 ```
 
 The ledger stores metadata only; it does not execute task instructions. Do not put secrets or production credentials in task descriptions.
+
+## Current limits
+
+The private repo's GitHub plan prevents server-side branch protection, and the available OAuth grant cannot push workflow files. A CI template is available at [docs/workflows/tests.yml.example](docs/workflows/tests.yml.example); local tests pass. Until branch protection and isolated runtime controls are available, do not grant any agent write access to `main`.
