@@ -2,13 +2,13 @@
 
 ## Phase 0 — policy and local queue (in progress)
 
-- [x] Create private GitHub repository and invite `pc099` with write access.
+- [x] Create repository, invite `pc099` with write access, and publish it with owner approval.
 - [x] Define owner-controlled charter, target architecture, and threat model.
 - [x] Implement local task ledger with atomic claim/transition behavior and tests.
-- [x] Push the foundation and research notes to `main`.
+- [x] Protect `main` with code-owner review and no force-push/deletion; CI status checks remain to be added.
+- [x] Push the foundation, research, and hardening changes to `main`.
 - [ ] Owner accepts the pending contributor invitation.
-- [ ] Add the checked-in CI template after GitHub authorizes workflow writes.
-- [ ] Enable server-side branch protection after plan/permissions allow it; keep repo private until owner decides otherwise.
+- [ ] Add the CI workflow after the owner-authorized workflow scope is available.
 
 ## Phase 1 — human-triggered isolated draft PR
 

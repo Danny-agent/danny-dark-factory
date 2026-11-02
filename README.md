@@ -1,6 +1,6 @@
 # Danny Dark Factory
 
-Private, human-reviewed software-factory prototype. **This repository currently accepts task metadata only; it cannot run agents, open PRs, merge changes, or deploy.**
+Public, human-reviewed software-factory prototype. **This repository currently accepts task metadata only; it cannot run agents, open PRs, merge changes, or deploy.**
 
 - [Charter](docs/CHARTER.md) — what the factory may eventually do and hard stops.
 - [Architecture](docs/ARCHITECTURE.md) — component boundaries and intended workflow.
@@ -29,4 +29,4 @@ The ledger stores metadata only; it does not execute task instructions. Do not p
 
 ## Current limits
 
-The private repo's GitHub plan prevents server-side branch protection, and the available OAuth grant cannot push workflow files. A CI template is available at [docs/workflows/tests.yml.example](docs/workflows/tests.yml.example); local tests pass. Until branch protection and isolated runtime controls are available, do not grant any agent write access to `main`.
+The task ledger stores metadata only; it does not execute task instructions. `main` now requires a pull request, one code-owner approval, last-push approval, and resolved conversations; force-pushes and branch deletion are disabled. Required CI checks are not active yet: [the workflow template](docs/workflows/tests.yml.example) can be installed after the authorized GitHub workflow scope is approved. Do not grant any agent write access to `main`.
