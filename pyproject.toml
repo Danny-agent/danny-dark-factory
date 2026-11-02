@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "danny-dark-factory"
+version = "0.1.0"
+description = "A governed, evidence-first AI software factory foundation"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Danny-agent" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+factory = "dark_factory.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

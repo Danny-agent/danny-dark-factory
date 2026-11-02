@@ -1,0 +1,28 @@
+# GitHub Actions CI setup (copy to `.github/workflows/tests.yml`)
+
+The automation token used to create this repository lacks GitHub's `workflow` scope, so a workflow file cannot be pushed from this session. The scope was not expanded. The local tests were run successfully; this template is here for the owner to add after enabling workflow permissions.
+
+```yaml
+name: tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
+      - run: python -m pytest -q
+```
+
+Once enabled, confirm the exact status-check name before requiring it in branch protection. Do not permit task workers to modify workflows or change repository rules.
