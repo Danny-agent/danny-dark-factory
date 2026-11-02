@@ -34,8 +34,12 @@ def test_claim_is_atomic_under_concurrent_workers(tmp_path):
     ctx = multiprocessing.get_context("fork")
     results = ctx.Queue()
     workers = [ctx.Process(target=compete, args=(f"w{i}", str(store.root), results)) for i in range(8)]
-    for worker in workers: worker.start()
-    for worker in workers: worker.join(5)
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(5)
+    assert all(not worker.is_alive() for worker in workers)
+    assert [worker.exitcode for worker in workers] == [0] * len(workers)
     claims = [results.get(timeout=1) for _ in workers]
     assert sum(result is not None for result in claims) == 1
 

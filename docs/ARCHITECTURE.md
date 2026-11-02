@@ -14,7 +14,7 @@ Human specification → intake/queue → deterministic policy → bounded coordi
 
 ### Components and boundaries
 
-- **Task ledger:** canonical task IDs, immutable intent, acceptance criteria, risk tier, revision, status, timestamps. The repository and durable task backend—not model conversation history—own status.
+- **Task ledger:** canonical task IDs, immutable intent, acceptance criteria, risk tier, revision, status, timestamps. The repository and durable task backend—not model conversation history—own status. A task's `claimed_by` field is an operator-supplied label, not authentication or authorization.
 - **Coordinator:** atomic claims, leases/fencing, retries, stop switch, concurrency and spend/time budgets. Start with a local runner/GitHub Actions; add Temporal only when observed durability requirements warrant it.
 - **Worker adapter:** OpenHands or a CLI-based coding agent may be evaluated; one adapter at a time. Each task gets a disposable workspace with narrow filesystem/network permissions.
 - **Verification:** required deterministic checks plus independent review/evidence. CI result must correspond to exact commit and environment. Tests/policy files are protected.

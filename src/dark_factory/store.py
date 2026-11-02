@@ -69,9 +69,102 @@ class TaskStore:
             data = json.loads(self.data_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise QueueError(f"Cannot read task ledger safely: {exc}") from exc
-        if not isinstance(data, dict) or data.get("schema_version") != 1 or not isinstance(data.get("tasks"), list):
+        if (
+            not isinstance(data, dict)
+            or type(data.get("schema_version")) is not int
+            or data["schema_version"] != 1
+            or not isinstance(data.get("tasks"), list)
+        ):
             raise QueueError("Unsupported or corrupt task ledger schema")
+        if len(data["tasks"]) > 10000:
+            raise QueueError("Task ledger exceeds the 10000-record safety limit")
+        seen_ids: set[str] = set()
+        for index, task in enumerate(data["tasks"]):
+            try:
+                self._validate_task(task)
+            except QueueError as exc:
+                raise QueueError(f"Invalid task record at index {index}: {exc}") from exc
+            if task["id"] in seen_ids:
+                raise QueueError(f"Invalid task record at index {index}: duplicate task id")
+            seen_ids.add(task["id"])
         return data
+
+    def _validate_task(self, task: object) -> None:
+        if not isinstance(task, dict):
+            raise QueueError("record must be an object")
+        required = {
+            "id", "title", "description", "risk", "acceptance", "status", "revision",
+            "created_at", "updated_at", "claimed_by", "events",
+        }
+        if not required.issubset(task):
+            raise QueueError("required fields are missing")
+        if set(task) != required:
+            raise QueueError("record contains unknown fields")
+        try:
+            task_id = task["id"]
+            if not isinstance(task_id, str) or str(uuid.UUID(task_id)) != task_id:
+                raise QueueError("id must be a canonical UUID")
+            for field, limit in (("title", 180), ("description", 4000)):
+                value = task[field]
+                if not isinstance(value, str):
+                    raise QueueError(f"{field} must be text")
+                self._validate_text(value, field, limit)
+            if task["risk"] not in {"low", "medium", "high"}:
+                raise QueueError("risk is invalid")
+            if task["status"] not in STATUSES:
+                raise QueueError("status is invalid")
+            if type(task["revision"]) is not int or task["revision"] < 1:
+                raise QueueError("revision must be a positive integer")
+            acceptance = task["acceptance"]
+            if not isinstance(acceptance, list) or not 1 <= len(acceptance) <= 20:
+                raise QueueError("acceptance must contain 1–20 criteria")
+            for criterion in acceptance:
+                if not isinstance(criterion, str):
+                    raise QueueError("acceptance criteria must be text")
+                self._validate_text(criterion, "acceptance criterion", 300)
+            for field in ("created_at", "updated_at"):
+                if not isinstance(task[field], str):
+                    raise QueueError(f"{field} must be an ISO timestamp")
+                datetime.fromisoformat(task[field])
+            claimed_by = task["claimed_by"]
+            if claimed_by is not None:
+                if not isinstance(claimed_by, str):
+                    raise QueueError("claimed_by must be text or null")
+                self._validate_text(claimed_by, "claimed_by", 100)
+            active = {"claimed", "planning", "implementing", "verifying"}
+            if (task["status"] in active) != (claimed_by is not None):
+                raise QueueError("claimant does not match task status")
+            events = task["events"]
+            if not isinstance(events, list) or not 1 <= len(events) <= 1000:
+                raise QueueError("events must contain 1–1000 records")
+            if len(events) != task["revision"]:
+                raise QueueError("revision does not match event count")
+            previous = None
+            for index, event in enumerate(events):
+                if not isinstance(event, dict) or set(event) != {"from", "to", "at", "actor"}:
+                    raise QueueError(f"event {index} has missing or unknown fields")
+                source, target = event["from"], event["to"]
+                if index == 0:
+                    if source is not None or target != "queued":
+                        raise QueueError("first event must create a queued task")
+                else:
+                    if not isinstance(source, str) or source not in STATUSES or source != previous:
+                        raise QueueError(f"event {index} has an invalid source status")
+                    if target not in TRANSITIONS[source]:
+                        raise QueueError(f"event {index} breaks the transition history")
+                if target not in STATUSES:
+                    raise QueueError(f"event {index} has an unknown status")
+                for field in ("actor", "at"):
+                    if not isinstance(event[field], str) or not event[field].strip():
+                        raise QueueError(f"event {index} {field} must be non-empty text")
+                datetime.fromisoformat(event["at"])
+                previous = target
+            if previous != task["status"]:
+                raise QueueError("last event does not match task status")
+            if task["status"] in active and claimed_by != events[-1]["actor"]:
+                raise QueueError("claimant does not match the last event actor")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise QueueError("fields have invalid types or values") from exc
 
     def _write(self, data: dict) -> None:
         fd, tmp = tempfile.mkstemp(prefix=".tasks-", suffix=".tmp", dir=self.root)
