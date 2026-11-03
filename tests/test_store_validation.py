@@ -66,3 +66,16 @@ def test_active_claimant_matches_last_transition_actor(tmp_path):
     store.data_path.write_text(json.dumps({"schema_version": 1, "tasks": [task]}), encoding="utf-8")
     with pytest.raises(QueueError, match="claimant does not match the last event actor"):
         store.list()
+
+
+def test_naive_task_timestamps_are_rejected(tmp_path):
+    store = TaskStore(tmp_path / "state")
+    store.initialize()
+    task = store.add("Timestamp check", "Timestamps must be timezone-aware.", "low", ["UTC ordering"])
+    task["created_at"] = "2026-01-01T00:00:00"
+    task["updated_at"] = task["created_at"]
+    task["events"][0]["at"] = task["created_at"]
+    store.data_path.write_text(json.dumps({"schema_version": 1, "tasks": [task]}), encoding="utf-8")
+
+    with pytest.raises(QueueError, match="timezone-aware"):
+        store.list()

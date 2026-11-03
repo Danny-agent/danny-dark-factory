@@ -5,7 +5,11 @@ import os
 import stat
 import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,8 +18,93 @@ from dark_factory.execution import (
     ExecutionError,
     TaskExecutor,
     VerificationResult,
+    _run,
 )
 from dark_factory.store import TaskStore
+
+
+def test_run_rejects_unbounded_child_output(monkeypatch):
+    import dark_factory.execution as execution_module
+
+    monkeypatch.setattr(execution_module, "MAX_COMMAND_OUTPUT_CHARS", 128)
+    command = [sys.executable, "-c", "import sys; sys.stdout.write('x' * 1000); sys.stderr.write('y' * 1000)"]
+
+    with pytest.raises(ExecutionError, match="output exceeded"):
+        _run(command, timeout=10)
+
+
+def test_run_terminates_infinite_output_when_cap_is_reached(monkeypatch):
+    import dark_factory.execution as execution_module
+
+    monkeypatch.setattr(execution_module, "MAX_COMMAND_OUTPUT_CHARS", 128)
+    start = time.monotonic()
+    command = [sys.executable, "-c", "import os; exec(\"while True: os.write(1, b'x' * 4096)\")"]
+
+    with pytest.raises(ExecutionError, match="output exceeded"):
+        _run(command, timeout=2)
+
+    assert time.monotonic() - start < 2
+
+
+def test_run_timeout_covers_blocked_stdin_write(tmp_path):
+    pid_file = tmp_path / "stdin-child.pid"
+    child_code = "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(30)"
+    harness_code = "\n".join(
+        [
+            "import sys",
+            "from dark_factory.execution import _run, ExecutionError",
+            f"child_code = {child_code!r}",
+            "try:",
+            "    _run([sys.executable, '-c', child_code, sys.argv[1]], timeout=1, stdin='x' * 2_000_000)",
+            "except ExecutionError as exc:",
+            "    print(str(exc))",
+        ]
+    )
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+    harness = subprocess.Popen(
+        [sys.executable, "-c", harness_code, str(pid_file)],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not pid_file.exists() and harness.poll() is None:
+            time.sleep(0.02)
+        if pid_file.exists():
+            child_pid = int(pid_file.read_text(encoding="ascii"))
+        stdout, stderr = harness.communicate(timeout=4)
+        assert harness.returncode == 0, stderr
+        assert "timed out after 1s" in stdout
+    finally:
+        for pid in (child_pid, harness.pid):
+            if pid is not None:
+                try:
+                    os.killpg(pid, 9)
+                except ProcessLookupError:
+                    pass
+        if harness.poll() is None:
+            harness.wait(timeout=2)
+
+
+def test_run_closes_inherited_output_pipes_by_stopping_descendants():
+    child_code = "import time; time.sleep(30)"
+    parent_code = f"import subprocess,sys; subprocess.Popen([sys.executable, '-c', {child_code!r}]); print('done')"
+
+    result = _run([sys.executable, "-c", parent_code], timeout=10)
+
+    assert result.returncode == 0
+    assert result.stdout == "done\n"
+
+
+def test_run_preserves_small_child_output():
+    result = _run([sys.executable, "-c", "print('ready')"], timeout=10)
+
+    assert result.returncode == 0
+    assert result.stdout == "ready\n"
 
 
 def git(repo: Path, *args: str) -> str:
@@ -101,10 +190,10 @@ def test_low_risk_task_runs_tests_then_publishes_a_draft_pr(tmp_path):
     assert git(tmp_path / "repo", "worktree", "list", "--porcelain").count("worktree ") == 1
 
 
-def test_medium_risk_task_is_not_claimed_or_executed(tmp_path):
-    runner, store, task, calls, publisher = make_runner(tmp_path, risk="medium")
+def test_high_risk_task_is_not_claimed_or_executed(tmp_path):
+    runner, store, task, calls, publisher = make_runner(tmp_path, risk="high")
 
-    with pytest.raises(ExecutionError, match="only low-risk"):
+    with pytest.raises(ExecutionError, match="only low- or medium-risk"):
         runner.execute(task["id"])
 
     assert store.list()[0]["status"] == "queued"
@@ -112,7 +201,167 @@ def test_medium_risk_task_is_not_claimed_or_executed(tmp_path):
     assert publisher.published == []
 
 
-def test_codex_worker_uses_isolated_identity_and_workspace_write_sandbox(tmp_path, monkeypatch):
+def test_medium_risk_task_runs_through_verified_draft_pr(tmp_path):
+    runner, store, task, calls, publisher = make_runner(tmp_path, risk="medium")
+
+    result = runner.execute(task["id"])
+
+    assert result.status == "draft_pr"
+    assert store.list()[0]["status"] == "draft_pr"
+    assert calls == ["preflight", "agent", "verify", "publish"]
+    assert publisher.published[0][1] == task["id"]
+
+
+def test_verification_failure_blocks_task_without_publication(tmp_path):
+    runner, store, task, calls, publisher = make_runner(tmp_path, risk="medium")
+
+    class FailedVerifier:
+        def verify(self, workspace):
+            calls.append("verify")
+            return VerificationResult(False, "tests failed")
+
+    runner.verifier = FailedVerifier()
+
+    with pytest.raises(ExecutionError, match="containerized verification failed"):
+        runner.execute(task["id"])
+
+    assert store.list()[0]["status"] == "blocked"
+    assert calls == ["preflight", "agent", "verify"]
+    assert publisher.published == []
+
+
+def test_concurrent_auto_dispatchers_do_not_overlap_active_run(tmp_path):
+    runner_one, store, first, calls_one, publisher_one = make_runner(tmp_path, risk="medium")
+    second = store.add("Second task", "Wait for the active dispatch.", "low", ["tests pass"])
+    entered = threading.Event()
+    release = threading.Event()
+    calls_two: list[str] = []
+
+    class BlockingAgent(WritingAgent):
+        def preflight(self):
+            self.calls.append("preflight")
+            entered.set()
+            if not release.wait(timeout=10):
+                raise AssertionError("test did not release the active preflight")
+
+    runner_one.agent = BlockingAgent(calls_one)
+    runner_one.verifier = PassingVerifier(calls_one)
+    publisher_two = RecordingPublisher(calls_two)
+    runner_two = TaskExecutor(
+        store=store,
+        repo_root=runner_one.repo_root,
+        work_root=runner_one.work_root,
+        agent=WritingAgent(calls_two),
+        verifier=PassingVerifier(calls_two),
+        publisher=publisher_two,
+        base_ref=runner_one.base_ref,
+        actor=runner_one.actor,
+        protected_paths=runner_one.protected_paths,
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(runner_one.execute_next)
+        assert entered.wait(timeout=10)
+        try:
+            assert pool.submit(runner_two.execute_next).result(timeout=5) is None
+        finally:
+            release.set()
+        first_result = first_future.result(timeout=30)
+
+    records = {task["id"]: task for task in store.list()}
+    assert first_result is not None and first_result.task_id == first["id"]
+    assert records[first["id"]]["status"] == "draft_pr"
+    assert records[second["id"]]["status"] == "queued"
+    assert calls_one == ["preflight", "agent", "verify", "publish"]
+    assert calls_two == []
+    assert len(publisher_one.published) == 1
+    assert publisher_two.published == []
+
+
+def test_automatic_preflight_failure_releases_claimed_task(tmp_path):
+    runner, store, task, calls, publisher = make_runner(tmp_path)
+
+    class ClaimCheckingVerifier:
+        def preflight(self):
+            assert store.list()[0]["status"] == "claimed"
+            raise ExecutionError("verification image unavailable")
+
+        def verify(self, workspace: Path) -> VerificationResult:
+            raise AssertionError("verification must not run after failed preflight")
+
+    runner.verifier = ClaimCheckingVerifier()
+
+    with pytest.raises(ExecutionError, match="verification image unavailable"):
+        runner.execute_next()
+
+    record = store.list()[0]
+    assert record["id"] == task["id"]
+    assert record["status"] == "queued"
+    assert [event["to"] for event in record["events"]] == ["queued", "claimed", "queued"]
+    assert calls == ["preflight"]
+    assert publisher.published == []
+
+
+def test_manual_execution_claims_before_preflight_and_requeues_on_failure(tmp_path):
+    runner, store, task, calls, publisher = make_runner(tmp_path)
+
+    class ClaimCheckingAgent(WritingAgent):
+        def preflight(self):
+            self.calls.append("preflight")
+            assert store.list()[0]["status"] == "claimed"
+            raise ExecutionError("manual preflight unavailable")
+
+    runner.agent = ClaimCheckingAgent(calls)
+    with pytest.raises(ExecutionError, match="manual preflight unavailable"):
+        runner.execute(task["id"])
+
+    record = store.list()[0]
+    assert record["id"] == task["id"]
+    assert record["status"] == "queued"
+    assert [event["to"] for event in record["events"]] == ["queued", "claimed", "queued"]
+    assert calls == ["preflight"]
+    assert publisher.published == []
+
+
+def test_automatic_dispatcher_runs_one_task_per_invocation_in_order(tmp_path):
+    runner, store, first, calls, publisher = make_runner(tmp_path, risk="medium")
+    second = store.add("Second task", "Do this next.", "low", ["tests pass"])
+
+    first_result = runner.execute_next()
+
+    assert first_result is not None
+    assert first_result.task_id == first["id"]
+    assert first_result.status == "draft_pr"
+    statuses = {task["id"]: task["status"] for task in store.list()}
+    assert statuses[first["id"]] == "draft_pr"
+    assert statuses[second["id"]] == "queued"
+
+    second_result = runner.execute_next()
+
+    assert second_result is not None
+    assert second_result.task_id == second["id"]
+    assert second_result.status == "draft_pr"
+    assert runner.execute_next() is None
+    assert len(calls) == 8
+    assert calls == ["preflight", "agent", "verify", "publish"] * 2
+    assert len(publisher.published) == 2
+
+
+def test_codex_worker_rejects_unapproved_codex_home_settings(tmp_path):
+    from dark_factory.execution import CodexAgent, ExecutionError
+
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config = codex_home / "config.toml"
+    config.write_text('[mcp_servers.evil]\ncommand = "nope"\n', encoding="utf-8")
+    config.chmod(0o600)
+    agent = CodexAgent(executable="/bin/true", codex_home=codex_home)
+
+    with pytest.raises(ExecutionError, match="unapproved Codex configuration"):
+        agent._base_env()
+
+
+def test_codex_worker_uses_isolated_identity_and_credential_denied_profile(tmp_path, monkeypatch):
     from dark_factory.execution import CodexAgent
 
     codex_home = tmp_path / "factory-codex-home"
@@ -131,23 +380,83 @@ def test_codex_worker_uses_isolated_identity_and_workspace_write_sandbox(tmp_pat
     for key in ("GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY"):
         monkeypatch.setenv(key, "must-not-enter-worker")
 
-    agent = CodexAgent(executable=str(executable), codex_home=codex_home)
+    repo_root = tmp_path / "factory-repo"
+    git_metadata = repo_root / ".git"
+    git_metadata.mkdir(parents=True)
+    git_metadata.chmod(0o755)
+    agent = CodexAgent(executable=str(executable), codex_home=codex_home, repo_root=repo_root)
     result = agent.run({"id": "task", "title": "safe", "description": "bounded", "acceptance": ["passes"]}, workspace)
 
     invocation = json.loads(capture.read_text(encoding="utf-8"))
+    profile = (codex_home / "factory-worker.config.toml").read_text(encoding="utf-8")
     assert result.exit_code == 0
-    assert invocation["env"]["HOME"] == str(codex_home)
     assert invocation["env"]["CODEX_HOME"] == str(codex_home)
+    assert invocation["env"]["HOME"].startswith(str(workspace))
     assert all(key not in invocation["env"] for key in ("GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY"))
     assert invocation["env"]["GIT_CONFIG_GLOBAL"] == "/dev/null"
     assert invocation["env"]["GH_CONFIG_DIR"] != str(Path.home() / ".config" / "gh")
-    assert "--sandbox" in invocation["argv"]
-    assert "workspace-write" in invocation["argv"]
+    assert "--profile" in invocation["argv"]
+    assert invocation["argv"][invocation["argv"].index("--profile") + 1] == "factory-worker"
+    assert "--sandbox" not in invocation["argv"]
+    assert "--strict-config" in invocation["argv"]
     assert "--ephemeral" in invocation["argv"]
-    assert "--ignore-user-config" in invocation["argv"]
+    assert "--ignore-user-config" not in invocation["argv"]
     assert "--dangerously-bypass-approvals-and-sandbox" not in invocation["argv"]
+    assert 'default_permissions = "factory-worker"' in profile
+    assert 'web_search = "disabled"' in profile
+    assert '":root" = "deny"' in profile
+    assert '":minimal" = "read"' in profile
+    assert f'"{repo_root / ".git"}" = "read"' in profile
+    assert f'[projects."{workspace.resolve()}"]\ntrust_level = "untrusted"' in profile
+    assert '":workspace_roots"]\n"." = "write"' in profile
+    assert '".git" = "read"' in profile
+    assert "enabled = false" in profile
+    assert '"/var/run/docker.sock" = "deny"' in profile
     assert "UNTRUSTED TASK JSON" in invocation["prompt"]
     assert '"description": "bounded"' in invocation["prompt"]
+    assert "configured containerized verification suite" in invocation["prompt"]
+    assert "must pass independent verification" not in invocation["prompt"]
+    assert (codex_home / "factory-worker.config.toml").stat().st_mode & 0o777 == 0o600
+
+
+def test_codex_profile_resolves_linked_worktree_git_metadata_read_only(tmp_path):
+    from dark_factory.execution import CodexAgent
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    common_dir = tmp_path / "source" / ".git"
+    common_dir.mkdir(parents=True)
+    common_dir.chmod(0o755)
+    gitdir = common_dir / "worktrees" / "factory-task"
+    gitdir.mkdir(parents=True)
+    gitdir.chmod(0o755)
+    (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+    (workspace / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    agent = CodexAgent(codex_home=tmp_path / "codex-home", repo_root=workspace)
+
+    resolved = agent._trusted_git_common_dir()
+
+    assert resolved == common_dir.resolve()
+    assert f'"{resolved}" = "read"' in agent._worker_profile_text()
+
+
+def test_codex_profile_rejects_git_metadata_outside_runner_parent(tmp_path):
+    from dark_factory.execution import CodexAgent, ExecutionError
+
+    workspace = tmp_path / "runner" / "workspace"
+    workspace.mkdir(parents=True)
+    common_dir = tmp_path / "other" / ".git"
+    common_dir.mkdir(parents=True)
+    common_dir.chmod(0o755)
+    gitdir = common_dir / "worktrees" / "factory-task"
+    gitdir.mkdir(parents=True)
+    gitdir.chmod(0o755)
+    (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+    (workspace / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    agent = CodexAgent(codex_home=tmp_path / "codex-home", repo_root=workspace)
+
+    with pytest.raises(ExecutionError, match="outside the approved repository boundary"):
+        agent._trusted_git_common_dir()
 
 
 def test_verifier_runs_pytest_networkless_and_read_only(tmp_path, monkeypatch):
@@ -182,14 +491,14 @@ def test_verifier_runs_pytest_networkless_and_read_only(tmp_path, monkeypatch):
     assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1" in args
 
 
-def test_worker_cannot_change_the_test_suite(tmp_path):
+def test_worker_cannot_change_charter_policy_file(tmp_path):
     runner, store, task, calls, publisher = make_runner(tmp_path)
 
     class TestEditingAgent(WritingAgent):
         def run(self, task, workspace):
             result = super().run(task, workspace)
-            (workspace / "tests").mkdir()
-            (workspace / "tests" / "test_bypass.py").write_text("def test_passes(): pass\n", encoding="utf-8")
+            (workspace / "docs").mkdir()
+            (workspace / "docs" / "CHARTER.md").write_text("def test_passes(): pass\n", encoding="utf-8")
             return result
 
     runner.agent = TestEditingAgent(calls)
@@ -199,6 +508,74 @@ def test_worker_cannot_change_the_test_suite(tmp_path):
     assert store.list()[0]["status"] == "blocked"
     assert calls == ["preflight", "agent"]
     assert publisher.published == []
+
+
+@pytest.mark.parametrize("protected_path", ["docs/CODEOWNERS", "CODEOWNERS", ".github/CODEOWNERS"])
+def test_worker_cannot_change_codeowners_files(tmp_path, protected_path):
+    runner, store, task, calls, publisher = make_runner(tmp_path)
+
+    class OwnershipEditingAgent(WritingAgent):
+        def run(self, task, workspace):
+            result = super().run(task, workspace)
+            path = workspace / protected_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("owner changed", encoding="utf-8")
+            return result
+
+    runner.agent = OwnershipEditingAgent(calls)
+    with pytest.raises(ExecutionError, match="protected policy"):
+        runner.execute(task["id"])
+
+    assert store.list()[0]["status"] == "blocked"
+    assert calls == ["preflight", "agent"]
+    assert publisher.published == []
+
+
+def test_worker_can_propose_coordinator_source_only_as_draft_pr(tmp_path):
+    runner, store, task, calls, publisher = make_runner(tmp_path)
+
+    class CoordinatorChangeAgent(WritingAgent):
+        def run(self, task, workspace):
+            result = super().run(task, workspace)
+            source = workspace / "src" / "dark_factory" / "cli.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("# proposed coordinator change\\n", encoding="utf-8")
+            return result
+
+    runner.agent = CoordinatorChangeAgent(calls)
+    result = runner.execute(task["id"])
+
+    assert result.status == "draft_pr"
+    assert store.list()[0]["status"] == "draft_pr"
+    assert publisher.published
+    assert calls == ["preflight", "agent", "verify", "publish"]
+
+
+def test_worker_can_propose_test_changes_in_a_reviewable_draft_pr(tmp_path):
+    runner, store, task, calls, publisher = make_runner(tmp_path)
+
+    class TestAddingAgent(WritingAgent):
+        def run(self, task, workspace):
+            result = super().run(task, workspace)
+            tests = workspace / "tests"
+            tests.mkdir()
+            (tests / "test_addition.py").write_text("def test_added(): assert True\n", encoding="utf-8")
+            return result
+
+    class TestAwareVerifier(PassingVerifier):
+        def verify(self, workspace):
+            assert (workspace / "tests" / "test_addition.py").is_file()
+            return super().verify(workspace)
+
+    runner.agent = TestAddingAgent(calls)
+    runner.verifier = TestAwareVerifier(calls)
+    result = runner.execute(task["id"])
+
+    assert result.status == "draft_pr"
+    assert store.list()[0]["status"] == "draft_pr"
+    assert publisher.published
+    assert calls == ["preflight", "agent", "verify", "publish"]
+
 
 
 def test_secret_like_diff_is_blocked_before_publication(tmp_path):
@@ -440,8 +817,28 @@ def test_codex_home_rejects_ancestor_owned_by_another_user(tmp_path, monkeypatch
         agent._base_env()
 
 
+def test_codex_home_group_lookup_handles_unlisted_primary_gid(monkeypatch):
+    import dark_factory.execution as execution
+
+    def missing_group(gid):
+        raise KeyError(gid)
+
+    monkeypatch.setattr(execution.grp, "getgrgid", missing_group)
+    monkeypatch.setattr(
+        execution.pwd,
+        "getpwall",
+        lambda: [SimpleNamespace(pw_gid=os.getgid(), pw_uid=os.getuid())],
+    )
+
+    assert execution._group_has_other_users(os.getgid()) is False
+    assert execution._group_has_other_users(os.getgid() + 1) is True
+
+
 def test_codex_home_rejects_reachable_group_writable_ancestor(tmp_path, monkeypatch):
+    import dark_factory.execution as execution
     from dark_factory.execution import CodexAgent
+
+    monkeypatch.setattr(execution, "_group_has_other_users", lambda gid: True)
 
     parent = tmp_path / "parent"
     parent.mkdir()
@@ -476,6 +873,45 @@ def test_codex_home_rejects_reachable_group_writable_ancestor(tmp_path, monkeypa
         agent._base_env()
 
     assert not home.exists()
+
+
+def test_codex_home_allows_private_group_writable_ancestor(tmp_path, monkeypatch):
+    import dark_factory.execution as execution
+    from dark_factory.execution import CodexAgent
+
+    monkeypatch.setattr(execution, "_group_has_other_users", lambda gid: False)
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    home = parent / "codex-home"
+    original_open = os.open
+    original_fstat = os.fstat
+    opened: dict[int, str] = {}
+
+    def tracking_open(name, flags, mode=0o777, *, dir_fd=None):
+        fd = original_open(name, flags, mode, dir_fd=dir_fd)
+        if dir_fd is not None:
+            opened[fd] = str(name)
+        return fd
+
+    def simulated_private_group_permissions(fd):
+        info = original_fstat(fd)
+        name = opened.get(fd)
+        mode = int(info.st_mode)
+        if name == "parent":
+            mode = (mode & ~0o070) | 0o030
+        elif name is not None:
+            mode = (mode & ~0o070) | stat.S_IXGRP
+        values = list(info)
+        values[0] = mode
+        return os.stat_result(values)
+
+    monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "fstat", simulated_private_group_permissions)
+    agent = CodexAgent(executable="/bin/true", codex_home=home)
+
+    agent._base_env()
+
+    assert home.stat().st_mode & 0o777 == 0o700
 
 
 def test_codex_home_refuses_symlink_swap_during_secure_open(tmp_path, monkeypatch):
