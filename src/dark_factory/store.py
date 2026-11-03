@@ -239,6 +239,22 @@ class TaskStore:
             self._write(data)
             return task
 
+    def claim_task(self, task_id: str, actor: str) -> dict:
+        """Atomically claim exactly one queued task by ID."""
+        task_id = self._validate_text(task_id, "task_id", 36)
+        actor = self._validate_text(actor, "actor", 100)
+        with self._locked():
+            data = self._read()
+            task = next((item for item in data["tasks"] if item["id"] == task_id), None)
+            if task is None:
+                raise QueueError(f"task not found: {task_id}")
+            if task["status"] != "queued":
+                raise QueueError(f"task is not queued: {task_id}")
+            self._transition_record(task, "claimed", actor)
+            task["claimed_by"] = actor
+            self._write(data)
+            return task
+
     def transition(self, task_id: str, target: str, actor: str, expected_revision: int) -> dict:
         if target not in STATUSES:
             raise QueueError(f"unknown status: {target}")

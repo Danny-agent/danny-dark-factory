@@ -1,8 +1,6 @@
 # Factory Charter (owner-controlled)
 
-**Policy owner:** Chaitanya (GitHub: `pc099`)  
-**Factory identity:** Danny-agent  
-**State:** initial conservative policy; changes require an explicit owner-reviewed PR.
+**Policy owner:** GitHub repository owner `@pc099` · **Factory identity:** `Danny-agent` · **State:** initial conservative policy; changes require an explicit owner-reviewed PR.
 
 ## Objective
 

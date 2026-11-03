@@ -1,4 +1,4 @@
-"""Conservative local CLI; no agent execution in this release."""
+"""Conservative task CLI with low-risk execution ending at a draft PR."""
 
 from __future__ import annotations
 
@@ -7,11 +7,12 @@ import json
 import sys
 from pathlib import Path
 
+from .execution import CodexAgent, DockerPytestVerifier, ExecutionError, GitHubPublisher, TaskExecutor
 from .store import QueueError, TaskStore
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="factory", description="Dark Factory task ledger (metadata only)")
+    parser = argparse.ArgumentParser(prog="factory", description="Governed low-risk coding tasks to human-reviewed draft PRs")
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="initialize local factory state")
     init.add_argument("state_dir", type=Path)
@@ -32,6 +33,22 @@ def build_parser() -> argparse.ArgumentParser:
     transition.add_argument("target")
     transition.add_argument("--actor", required=True)
     transition.add_argument("--expected-revision", type=int, required=True)
+
+    run = sub.add_parser("task-run", help="execute one low-risk task through isolated verification to a draft PR")
+    run.add_argument("state_dir", type=Path)
+    run.add_argument("task_id")
+    run.add_argument("--repo", type=Path, required=True, help="clean local checkout to modify")
+    run.add_argument("--work-root", type=Path, required=True, help="private directory outside the checkout")
+    run.add_argument("--repo-slug", required=True, help="GitHub OWNER/REPO for the draft PR")
+    run.add_argument("--base", default="main", help="GitHub base branch (default: main)")
+    run.add_argument(
+        "--codex-home", type=Path,
+        default=Path.home() / ".local/share/danny-dark-factory/codex-home",
+        help="isolated Codex CLI auth home; never reuse the host's general credential home",
+    )
+    run.add_argument("--agent-timeout", type=int, default=1800)
+    run.add_argument("--verification-image", default="danny-dark-factory-verifier:0.1.0")
+    run.add_argument("--verification-timeout", type=int, default=300)
     return parser
 
 
@@ -42,6 +59,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             store.initialize()
             print(f"initialized state at {store.root}")
+            return 0
+        if args.command == "task-run":
+            store.initialize()
+            runner = TaskExecutor(
+                store=store,
+                repo_root=args.repo,
+                work_root=args.work_root,
+                agent=CodexAgent(timeout_s=args.agent_timeout, codex_home=args.codex_home),
+                verifier=DockerPytestVerifier(
+                    image=args.verification_image,
+                    timeout_s=args.verification_timeout,
+                ),
+                publisher=GitHubPublisher(args.repo_slug, base=args.base),
+                base_ref=f"origin/{args.base}",
+            )
+            result = runner.execute(args.task_id)
+            print(json.dumps(result.__dict__, indent=2))
             return 0
         if args.command == "task-add":
             task = store.add(args.title, args.description, args.risk, args.acceptance)
@@ -62,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(task, indent=2))
             return 0
         return 2
-    except QueueError as exc:
+    except (QueueError, ExecutionError) as exc:
         print(f"factory: {exc}", file=sys.stderr)
         return 2
 
