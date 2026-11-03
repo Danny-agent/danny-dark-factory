@@ -12,7 +12,7 @@ an otherwise disabled autonomy tier or authorize publishing.
 Use direct execution for a well-scoped, reversible task with clear intent, known
 ownership, explicit acceptance criteria, and a small affected area. Read the live
 code and relevant documentation first, make the bounded change in the authorized
-workspace, and preserve concise evidence for independent verification and review.
+workspace, and preserve concise evidence for isolated verification and human review.
 Direct execution still requires every existing check and human review; it does not
 mean skipping research or deciding ambiguous product intent.
 
@@ -38,7 +38,7 @@ controls. An agent may draft options and evidence, but humans own design choices
 | Research | Findings from the live codebase: relevant paths and symbols, current behavior, existing tests, constraints, revision examined, and concise supporting evidence. Distinguish observed facts from assumptions and identify remaining gaps. | Assigned agent gathers and summarizes evidence within task authority; the task owner checks that it is sufficient for the decision. |
 | Design | Candidate approaches, tradeoffs, chosen behavior, compatibility concerns, verification approach, and rollback considerations. Record the human decision and rationale, or mark the decision pending. | Responsible human owns product and architecture decisions; the agent drafts alternatives and explains consequences. |
 | Structure | A sequence of small vertical slices, each delivering a coherent outcome with explicit paths or components, acceptance criteria, dependencies, exclusions, and a review boundary. Avoid a broad implementation task disguised as a plan. | Task owner maintains the breakdown; the responsible human resolves scope and design decisions. The agent may propose slices. |
-| Bounded Implement | One authorized slice with its scope, acceptance criteria, time/retry/cost limits, actual diff, verification results, unresolved issues, and evidence needed for independent review. Completion means the slice meets its criteria and required checks, not that it is merged or deployed. | Assigned worker implements within scoped capabilities; independent verification and human review remain with the existing reviewers and controls. |
+| Bounded Implement | One authorized slice with its scope, acceptance criteria, time/retry/cost limits, actual diff, verification results, unresolved issues, and evidence needed for human review. Completion means the slice meets its criteria and required checks, not that it is merged or deployed. | Assigned worker implements within scoped capabilities; the fixed isolated verifier executes checks and human review remains with the existing reviewers and controls. Worker-authored tests are part of the proposal, not independent proof of correctness. |
 
 Research should describe what the repository currently does, not rely on recalled
 architecture. Preserve a short evidence trail: revision, relevant file references,

@@ -17,7 +17,7 @@
 - [x] Require GitHub write access and server-enforced human approval on the target base; verify exact PR base/head SHA; never merge or deploy.
 - [x] Verify the local suite on the host and with the real Docker verifier.
 - [ ] Merge the code through the protected review path; live Codex task execution and authenticated PR publication remain unverified.
-- [ ] Adversarially validate the host-side Codex sandbox, credential visibility, and network behavior before using untrusted tasks.
+- [ ] Obtain fresh independent security review and adversarially validate the custom Codex permission profile, process visibility, credential separation, and network boundary before using hostile/untrusted tasks.
 - [ ] Add required CI and reconciliation/recovery behavior before routine operation.
 
 ## Phase 2 — controlled task intake and durability

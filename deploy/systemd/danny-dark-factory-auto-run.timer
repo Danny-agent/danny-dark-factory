@@ -1,0 +1,11 @@
+[Unit]
+Description=Start after activation, then wait between factory invocations
+
+[Timer]
+OnActiveSec=5min
+OnUnitInactiveSec=30min
+AccuracySec=1min
+Unit=danny-dark-factory-auto-run.service
+
+[Install]
+WantedBy=timers.target
