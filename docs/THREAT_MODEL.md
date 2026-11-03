@@ -1,29 +1,35 @@
-# Threat model (initial)
+# Threat model
 
 ## Assets
 
-Source code, GitHub write access, owner identity, build/test integrity, task evidence, secrets, production systems, and reviewer attention.
+Source code, GitHub write access, Codex account material, build/test integrity, task evidence, secrets, production systems, and reviewer attention.
 
 ## Threats
 
-- Prompt injection in issues, repository files, comments, webpages, dependencies, or tool output.
+- Prompt injection in task descriptions, issues, repository files, comments, dependencies, or tool output.
 - Worker modifies tests, policy, CI, or its own constraints to create false-green verification.
-- Duplicate/stale worker claims, retry storms, lost state, incorrect completion, or stale code/environment validation.
-- Secret disclosure through environment, mounted files, logs, artifacts, or network access.
-- Malicious or compromised dependency/agent/runtime; unsafe shell and destructive operations.
+- Duplicate/stale worker claims, retries, lost state, stale base refs, or incorrect completion.
+- Secret disclosure through environment variables, Codex auth files, workspace contents, logs, artifacts, or network access.
+- Malicious or compromised dependency/agent/runtime; unsafe shell, symlink escapes, or destructive operations.
 - Review overload, rubber-stamping, or output metrics hiding escaped defects.
+- A Docker/kernel or Codex sandbox escape affecting the shared host.
 
-## Initial controls
+## Current controls
 
-- Phase 0 does not execute task instructions or launch agents.
-- The repository is public per the owner's explicit choice; it contains source/research content only, with no production credentials or autonomous runner.
-- `main` is protected: pull request required, one code-owner approval, stale approvals dismissed, last-push approval and conversation resolution required, and force-push/branch deletion blocked. No required CI status checks are configured yet.
-- The owner `pc099` has an unexpired write invitation; acceptance is not independently verified. The `CODEOWNERS` rule requires that account's review.
-- The workflow file remains a checked-in template at `docs/workflows/tests.yml.example`; the authorized GitHub CLI grant still needs the `workflow` scope before it can be installed.
-- No secrets in tasks; no production credentials or host-wide mounts for future workers.
-- Local state writes are atomic and transitions validate expected revision. The CLI-supplied `actor` and `claimed_by` values are labels, not authenticated identities; this prototype is not a multi-user authorization boundary.
-- Future worker runs require disposable isolation, restricted network/filesystem, task-scoped credentials, hard time/cost limits, independently controlled tests, and an out-of-band kill switch.
+- The queue validates metadata and state transitions. Exact task IDs are atomically claimed; only low-risk queued tasks enter execution. Actor/claimant strings are labels, not authentication or authorization.
+- The worker prompt treats task JSON as untrusted. The worker gets a disposable Git worktree, Codex CLI `workspace-write` sandbox, dedicated `CODEX_HOME` prepared through component-wise `O_NOFOLLOW` directory handles (root/runner-owned ancestors; mode `0700`), reduced environment, and a fresh empty `GH_CONFIG_DIR`. GitHub tokens and inherited host API-token variables are not passed to it.
+- The coordinator rejects dirty source checkouts, mismatched GitHub origins, unavailable base refs, protected-path changes, worktree Git-pointer changes, worker-created symlinks, whitespace failures, submodule/LFS changes, and common credential patterns in staged Git blobs (maximum 64 MiB total). Credential scanning is heuristic and cannot guarantee that a diff is secret-free.
+- The independent verifier uses a pinned Python base image, local image only (`--pull=never`), no network, read-only source mount, dropped capabilities, no-new-privileges, PID/CPU/memory limits, and a temporary filesystem.
+- Before claiming work, preflight checks Codex login in the dedicated home, verifier-image availability, GitHub write permission, and base-branch protection. Failures leave the task queued. Later execution failures block the task for operator review.
+- Coordinator-owned commits occur after verification. The publisher pushes only a verified branch and creates a draft PR, checks the exact base/head SHA readback, and never merges or deploys.
+- Manifests are local, secret-free by design, and written with restrictive file permissions.
+- `main` is protected: PR required, one code-owner approval, stale approvals dismissed, last-push approval and conversation resolution required, admin enforcement, and force-push/branch deletion blocked. No required CI checks are configured. `pc099`'s write invitation is still pending acceptance; the account's active permission remains read until accepted.
+- The workflow file remains a checked-in template; the authorized GitHub CLI grant still needs the `workflow` scope before installation.
 
 ## Explicit non-claims
 
-Python filesystem state and a container are not a security sandbox against a same-user hostile process. Passing tests is not proof of correctness. The initial prototype is not yet production-safe for agent execution. Before enabling workers, add and adversarially test the actual isolation boundary and GitHub authorization model.
+- The host-side Codex sandbox and network restrictions have not been adversarially validated. The worker uses a dedicated Codex identity whose authentication material is sensitive; do not assume it is unreadable to hostile code.
+- Docker shares the host kernel. The container is a useful test-isolation boundary, not a proof against kernel/runtime escapes or hostile code in a multi-tenant production setting.
+- Passing tests, heuristic secret scanning, and a draft PR are not proof of correctness or safety. Human review is mandatory.
+- The live Codex task path and authenticated draft-PR publisher have not yet been exercised end-to-end; tests use fake CLI/GitHub commands for those integrations.
+- This implementation is not yet a hardened multi-tenant service: there is no remote authentication layer, durable lease/recovery protocol, automated cost accounting, required CI check, or deployment authority.
